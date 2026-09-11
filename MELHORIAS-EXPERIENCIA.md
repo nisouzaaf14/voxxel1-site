@@ -37,3 +37,20 @@ Página inicial refeita com composição de duas colunas, ilustração conceitua
 A imagem da abertura é uma ilustração gerada, identificada como conceitual, e não representa itens específicos à venda. Prompt: composição de estúdio grafite com vaso roxo estriado, organizador grafite e escultura roxa em laço, camadas FDM visíveis, sem texto ou logotipos. Produzida pela ferramenta de imagens integrada. O arquivo está em static/images/hero-voxxel.png. Fotos reais dos produtos cadastrados continuam sendo utilizadas; itens sem imagem mostram um aviso explícito.
 
 Os testes locais de compra e renderização das páginas foram repetidos após as alterações e passaram. Inspeção visual no navegador continua pendente. Nenhuma publicação foi realizada.
+
+
+## Revisão a partir da gravação de tela
+
+A gravação enviada mostra uma versão anterior ao redesign deste pacote, com chamadas de precisão e materiais que não constam na nova página inicial. A revisão foi aplicada ao projeto mais recente, preservando o redesign e as melhorias do carrinho.
+
+- Chamada principal: “Sua ideia vira uma peça 3D.”
+- Categorias e processo de compra com frases curtas e orientações concretas.
+- Sem prometer tolerância dimensional, ausência de marcas de camada ou padrão idêntico entre parceiros.
+- Cadastro do parceiro separado da conta do cliente nos textos e links de acesso.
+- Orçamento descrito como simulação sujeita à confirmação; campos de dimensão com rótulos individuais.
+- Produtos sem foto orientam o cliente a pedir uma referência.
+- Mensagem de erro de login mais explicativa, mantendo a autenticação existente.
+- Campo do chat pode encolher no celular sem empurrar o botão Enviar para fora.
+- Espaço adicional no rodapé e âncoras ajustadas para o cabeçalho fixo.
+
+A gravação permitiu conferir a apresentação da versão filmada. Ela não equivale a uma revisão no navegador da nova versão. O pacote não foi publicado.

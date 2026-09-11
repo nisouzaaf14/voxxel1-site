@@ -835,7 +835,7 @@ def conta_entrar():
                 session.permanent = True
                 return redirect(next_seguro(url_for("conta_dashboard")))
             registrar_falha_login(chave_rate_limit)
-            erro = "Telefone ou senha incorretos."
+            erro = "Não foi possível entrar. Confira o telefone com DDD e a senha deste cadastro."
 
     return render_template("conta_entrar.html", erro=erro)
 
@@ -1298,7 +1298,7 @@ def impressora_entrar():
                 session.permanent = True
                 return redirect(next_seguro(url_for("impressora_painel")))
             registrar_falha_login(chave_rate_limit)
-            erro = "Telefone ou senha incorretos."
+            erro = "Não foi possível entrar. Confira o telefone com DDD e a senha deste cadastro."
 
     return render_template("impressora_entrar.html", erro=erro)
 
