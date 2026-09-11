@@ -15,14 +15,21 @@ from PIL import Image
 from database import (
     init_db, get_db, CATEGORIAS, to_blob, criar_pedido, get_configs, set_configs, USING_POSTGRES,
     normalizar_telefone, criar_cliente, buscar_cliente_por_telefone, buscar_cliente_por_id,
-    listar_pedidos_cliente,
+    listar_pedidos_cliente, ler_coordenada_formulario,
+    criar_impressora, buscar_impressora_por_telefone, buscar_impressora_por_id, listar_impressoras,
+    definir_status_impressora, atualizar_localizacao_impressora, definir_impressora_ativa,
+    listar_pedidos_da_impressora, resumo_comissoes, percentual_comissao,
 )
-from calculadora import calcular_orcamento, formatar_horas, MATERIAIS, QUALIDADE, COMPLEXIDADE
+from calculadora import (
+    calcular_orcamento, formatar_horas, MATERIAIS, QUALIDADE, COMPLEXIDADE,
+    PRECO_HORA_IMPRESSAO, SHELL_FRACTION, CAT_ACABAMENTO,
+)
 import pix
 import mercadopago_pay
+import distribuicao
 
 SECRET_KEY_PADRAO = "troque-esta-chave-em-producao"
-ADMIN_PASSWORD_PADRAO = "voxxel123"
+ADMIN_PASSWORD_PADRAO = "@NI04041"
 
 ADMIN_PASSWORD = os.environ.get("VOXXEL_ADMIN_PASSWORD", ADMIN_PASSWORD_PADRAO)
 SECRET_KEY = os.environ.get("VOXXEL_SECRET_KEY", SECRET_KEY_PADRAO)
@@ -96,6 +103,18 @@ def login_cliente_obrigatorio(rota):
         if not session.get("cliente_id"):
             flash("Faça login para continuar.")
             return redirect(url_for("conta_entrar", next=request.path))
+        return rota(*args, **kwargs)
+    return rota_protegida
+
+
+def login_impressora_obrigatorio(rota):
+    """Mesma ideia do `login_cliente_obrigatorio`, só que pra conta da
+    impressora parceira -- protege o painel dela (status, ofertas, etc)."""
+    @wraps(rota)
+    def rota_protegida(*args, **kwargs):
+        if not session.get("impressora_id"):
+            flash("Faça login para acessar o painel da impressora.")
+            return redirect(url_for("impressora_entrar", next=request.path))
         return rota(*args, **kwargs)
     return rota_protegida
 
@@ -231,16 +250,24 @@ def carrinho_sessao():
 
 
 def carrinho_detalhado(conn):
-    itens = []
-    total = 0.0
-    for pid, qtd in carrinho_sessao().items():
+    itens, total, atualizado = [], 0.0, {}
+    for pid, qtd in list(carrinho_sessao().items()):
         row = conn.execute(
-            f"SELECT {COLUNAS_PRODUTO_LISTA} FROM produtos WHERE id = ?", (int(pid),)
+            f"SELECT {COLUNAS_PRODUTO_LISTA} FROM produtos WHERE id = ? AND ativo = 1", (int(pid),)
         ).fetchone()
-        if row:
-            subtotal = row["preco"] * qtd
-            total += subtotal
-            itens.append({"produto": row, "qtd": qtd, "subtotal": subtotal})
+        if not row or (row["estoque"] is not None and row["estoque"] <= 0):
+            continue
+        qtd = max(1, min(int(qtd), 999))
+        if row["estoque"] is not None:
+            qtd = min(qtd, row["estoque"])
+        atualizado[pid] = qtd
+        subtotal = row["preco"] * qtd
+        total += subtotal
+        itens.append({"produto": row, "qtd": qtd, "subtotal": subtotal})
+    if atualizado != carrinho_sessao():
+        session["carrinho"] = atualizado
+        session.modified = True
+        flash("Atualizamos seu carrinho conforme a disponibilidade. Confira os itens e o subtotal.")
     return itens, total
 
 
@@ -248,14 +275,14 @@ def carrinho_detalhado(conn):
 def inject_globals():
     qtd_carrinho = sum(carrinho_sessao().values())
     chat_auto_message = session.pop("voxxel_chat_auto", None)
-    vendedor_nome = None
-    if session.get("admin_logado"):
-        conn = get_db()
-        vendedor_nome = get_configs(conn)["vendedor_nome"]
-        conn.close()
+    conn = get_db()
+    config = get_configs(conn)
+    conn.close()
+    vendedor_nome = config["vendedor_nome"] if session.get("admin_logado") else None
+    whatsapp_numero = "".join(c for c in config["whatsapp"] if c.isdigit())
     return dict(
         categorias=CATEGORIAS, qtd_carrinho=qtd_carrinho, chat_auto_message=chat_auto_message,
-        vendedor_nome=vendedor_nome,
+        vendedor_nome=vendedor_nome, whatsapp_numero=whatsapp_numero,
     )
 
 
@@ -327,7 +354,7 @@ def carrinho_adicionar(produto_id):
         quantidade_pedida = 1
     carrinho = carrinho_sessao()
     pid = str(produto_id)
-    nova_qtd = carrinho.get(pid, 0) + quantidade_pedida
+    nova_qtd = min(999, carrinho.get(pid, 0) + quantidade_pedida)
 
     if produto["estoque"] is not None:
         if produto["estoque"] <= 0:
@@ -340,6 +367,25 @@ def carrinho_adicionar(produto_id):
     session.modified = True
     flash("Produto adicionado ao carrinho.")
     return redirect(redirecionamento_seguro(url_for("loja")))
+
+
+@app.route("/carrinho/atualizar/<int:produto_id>", methods=["POST"])
+def carrinho_atualizar(produto_id):
+    try:
+        quantidade = int(request.form.get("quantidade", ""))
+        if not 1 <= quantidade <= 999:
+            raise ValueError
+    except ValueError:
+        flash("Informe uma quantidade entre 1 e 999.")
+        return redirect(url_for("carrinho"))
+    carrinho = carrinho_sessao()
+    if str(produto_id) in carrinho:
+        carrinho[str(produto_id)] = quantidade
+        session.modified = True
+        conn = get_db()
+        carrinho_detalhado(conn)
+        conn.close()
+    return redirect(url_for("carrinho"))
 
 
 @app.route("/carrinho/remover/<int:produto_id>", methods=["POST"])
@@ -363,32 +409,62 @@ def carrinho():
 @login_cliente_obrigatorio
 def checkout():
     conn = get_db()
+    carrinho_anterior = dict(carrinho_sessao())
     itens, total = carrinho_detalhado(conn)
+    if request.method == "POST" and carrinho_anterior != carrinho_sessao():
+        conn.close()
+        return redirect(url_for("carrinho"))
     if not itens:
         conn.close()
         return redirect(url_for("loja"))
 
     cliente = buscar_cliente_por_id(conn, session["cliente_id"])
+    config = get_configs(conn)
+    pagamentos = {"combinar": "Combinar no WhatsApp"}
+    if config["pix_chave"].strip():
+        pagamentos["pix"] = "Pix"
+    if config["mp_access_token"].strip():
+        pagamentos["cartao"] = "Cartão"
 
     if request.method == "POST":
         nome = texto_seguro(request.form.get("nome"), 120)
         telefone = texto_seguro(request.form.get("telefone"), 40)
-        forma_pagamento = request.form.get("forma_pagamento", "pix")
-        if forma_pagamento not in ("pix", "cartao", "combinar"):
+        forma_pagamento = request.form.get("forma_pagamento", "combinar")
+        if forma_pagamento not in pagamentos:
             forma_pagamento = "combinar"
 
-        if not nome or not telefone:
-            flash("Preencha nome e telefone para finalizar o pedido.")
+        recebimento = request.form.get("recebimento", "combinar")
+        if recebimento not in ("combinar", "retirada", "entrega"):
+            recebimento = "combinar"
+        endereco = texto_seguro(request.form.get("endereco"), 350)
+        observacoes = texto_seguro(request.form.get("observacoes"), 500)
+        telefone_digitos = "".join(c for c in telefone if c.isdigit())
+        if recebimento != "retirada":
+            forma_pagamento = "combinar"
+        if not nome or not 10 <= len(telefone_digitos) <= 13 or (recebimento == "entrega" and len(endereco) < 15):
+            flash("Confira seu nome, telefone com DDD e, para entrega, o endereço completo com CEP.")
             conn.close()
-            return render_template("checkout.html", itens=itens, total=total, cliente=cliente)
+            return render_template("checkout.html", itens=itens, total=total, cliente=cliente, pagamentos=pagamentos)
 
         linhas = [f"{i['qtd']}x {i['produto']['nome']} - R$ {i['subtotal']:.2f}".replace(".", ",") for i in itens]
+        nomes_recebimento = {"combinar": "A combinar pelo WhatsApp", "retirada": "Retirada — local e horário a confirmar", "entrega": "Entrega — frete e prazo a confirmar antes do pagamento"}
+        linhas.append("Recebimento: " + nomes_recebimento[recebimento])
+        if recebimento == "entrega":
+            linhas.append("Endereço: " + endereco)
+        if observacoes:
+            linhas.append("Observações: " + observacoes)
         detalhes = "\n".join(linhas)
+
+        cliente_lat = ler_coordenada_formulario(request.form.get("cliente_lat"))
+        cliente_lng = ler_coordenada_formulario(request.form.get("cliente_lng"))
 
         pedido_id = criar_pedido(
             conn, "loja", detalhes, total, nome, telefone, forma_pagamento,
-            cliente_id=session["cliente_id"],
+            cliente_id=session["cliente_id"], cliente_lat=cliente_lat, cliente_lng=cliente_lng,
         )
+        # Já entra na fila de despacho pra impressora parceira mais
+        # próxima (se o cliente permitiu compartilhar a localização).
+        distribuicao.despachar_pedido(conn, pedido_id)
         conn.close()
 
         session["carrinho"] = {}
@@ -397,19 +473,28 @@ def checkout():
         return redirect(url_for("pedido_pagamento", pedido_id=pedido_id))
 
     conn.close()
-    return render_template("checkout.html", itens=itens, total=total, cliente=cliente)
+    return render_template("checkout.html", itens=itens, total=total, cliente=cliente, pagamentos=pagamentos)
 
 
 @app.route("/pedido/<int:pedido_id>/pagamento")
 def pedido_pagamento(pedido_id):
     conn = get_db()
     pedido = conn.execute("SELECT * FROM pedidos WHERE id = ?", (pedido_id,)).fetchone()
-    config = get_configs(conn)
-    conn.close()
     if not pedido:
+        conn.close()
         return redirect(url_for("home"))
     if not pedido_pertence_ao_usuario(pedido):
+        conn.close()
         abort(403)
+
+    # Avança a fila de despacho antes de mostrar a tela (expira oferta
+    # vencida / tenta a próxima impressora), pra página sempre refletir o
+    # estado mais atual sem precisar de um processo rodando em segundo plano.
+    distribuicao.avancar_distribuicao(conn, pedido_id)
+    pedido = conn.execute("SELECT * FROM pedidos WHERE id = ?", (pedido_id,)).fetchone()
+    impressora = buscar_impressora_por_id(conn, pedido["impressora_id"]) if pedido["impressora_id"] else None
+    config = get_configs(conn)
+    conn.close()
 
     pix_disponivel = bool(config["pix_chave"].strip()) and pedido["forma_pagamento"] == "pix"
     cartao_disponivel = bool(config["mp_access_token"].strip()) and pedido["forma_pagamento"] == "cartao"
@@ -422,6 +507,7 @@ def pedido_pagamento(pedido_id):
     return render_template(
         "pagamento.html", pedido=pedido, pix_disponivel=pix_disponivel,
         cartao_disponivel=cartao_disponivel, pix_payload=pix_payload, config=config,
+        impressora=impressora,
     )
 
 
@@ -490,7 +576,7 @@ def pedido_retorno_cartao(pedido_id):
             )
             session["voxxel_chat_auto"] = msg
             session.modified = True
-            flash("Pagamento aprovado! Confirme com nosso assistente virtual.")
+            flash("Pagamento aprovado na consulta. Fale com a Voxxel para confirmar os próximos passos.")
         elif status == "pending" or request.args.get("status") == "pending":
             flash("Pagamento em análise. Assim que for aprovado, atualizamos seu pedido.")
         else:
@@ -576,7 +662,7 @@ def pedido_confirmar_pagamento(pedido_id):
         )
         session["voxxel_chat_auto"] = msg
         session.modified = True
-        flash("Pagamento informado! Confirme com nosso assistente virtual.")
+        flash("Pagamento informado. Aguarde a conferência da Voxxel.")
     conn.close()
     return redirect(url_for("pedido_pagamento", pedido_id=pedido_id))
 
@@ -614,6 +700,7 @@ def orcamento():
                 materiais=MATERIAIS, qualidades=QUALIDADE, complexidades=COMPLEXIDADE,
                 materiais_js=json.dumps(MATERIAIS), qualidade_js=json.dumps(QUALIDADE),
                 complexidade_js=json.dumps(COMPLEXIDADE), cliente_logado=cliente_logado,
+                regra_js=json.dumps({"hora_maquina": PRECO_HORA_IMPRESSAO, "shell_fraction": SHELL_FRACTION, "cat_acabamento": CAT_ACABAMENTO}),
             )
         resultado = calcular_orcamento(
             form["altura"], form["largura"], form["profundidade"], form["quantidade"],
@@ -639,6 +726,7 @@ def orcamento():
                     materiais=MATERIAIS, qualidades=QUALIDADE, complexidades=COMPLEXIDADE,
                     materiais_js=json.dumps(MATERIAIS), qualidade_js=json.dumps(QUALIDADE),
                     complexidade_js=json.dumps(COMPLEXIDADE), cliente_logado=cliente_logado,
+                    regra_js=json.dumps({"hora_maquina": PRECO_HORA_IMPRESSAO, "shell_fraction": SHELL_FRACTION, "cat_acabamento": CAT_ACABAMENTO}),
                 )
 
             detalhes = (
@@ -648,11 +736,14 @@ def orcamento():
                 f"Qualidade: {form['qualidade']}\n"
                 f"Quantidade: {form['quantidade']}"
             )
+            cliente_lat = ler_coordenada_formulario(request.form.get("cliente_lat"))
+            cliente_lng = ler_coordenada_formulario(request.form.get("cliente_lng"))
             conn = get_db()
             pedido_id = criar_pedido(
                 conn, "orcamento", detalhes, resultado["preco_total"], nome, telefone, "pix",
-                cliente_id=session["cliente_id"],
+                cliente_id=session["cliente_id"], cliente_lat=cliente_lat, cliente_lng=cliente_lng,
             )
+            distribuicao.despachar_pedido(conn, pedido_id)
             conn.close()
 
             flash("Orçamento recebido! Você pode adiantar o pagamento por Pix ou combinar direto com a gente.")
@@ -663,6 +754,7 @@ def orcamento():
         materiais=MATERIAIS, qualidades=QUALIDADE, complexidades=COMPLEXIDADE,
         materiais_js=json.dumps(MATERIAIS), qualidade_js=json.dumps(QUALIDADE),
         complexidade_js=json.dumps(COMPLEXIDADE), cliente_logado=cliente_logado,
+        regra_js=json.dumps({"hora_maquina": PRECO_HORA_IMPRESSAO, "shell_fraction": SHELL_FRACTION, "cat_acabamento": CAT_ACABAMENTO}),
     )
 
 
@@ -704,7 +796,9 @@ def conta_cadastro():
         cliente_id = criar_cliente(conn, nome, telefone, generate_password_hash(senha))
         conn.close()
 
+        carrinho_salvo = dict(carrinho_sessao())
         session.clear()
+        session["carrinho"] = carrinho_salvo
         session["cliente_id"] = cliente_id
         session["cliente_nome"] = nome
         session.permanent = True
@@ -733,7 +827,9 @@ def conta_entrar():
             cliente = buscar_cliente_por_telefone(conn, telefone)
             conn.close()
             if cliente and check_password_hash(cliente["senha_hash"], senha):
+                carrinho_salvo = dict(carrinho_sessao())
                 session.clear()
+                session["carrinho"] = carrinho_salvo
                 session["cliente_id"] = cliente["id"]
                 session["cliente_nome"] = cliente["nome"]
                 session.permanent = True
@@ -794,6 +890,7 @@ def admin_dashboard():
     pedidos = conn.execute("SELECT * FROM pedidos ORDER BY id DESC").fetchall()
     produtos = conn.execute("SELECT id, ativo, estoque FROM produtos").fetchall()
     config = get_configs(conn)
+    comissoes = resumo_comissoes(conn)
     conn.close()
 
     receita_confirmada = sum(p["valor_estimado"] for p in pedidos if p["status_pagamento"] == "informado")
@@ -814,6 +911,8 @@ def admin_dashboard():
         pix_configurado=bool(config["pix_chave"].strip()),
         cartao_configurado=bool(config["mp_access_token"].strip()),
         ultimos_pedidos=pedidos[:5],
+        comissao_total=comissoes["total"],
+        comissao_por_impressora=comissoes["por_impressora"],
     )
 
 
@@ -822,6 +921,11 @@ def admin_dashboard():
 def admin_configuracoes():
     conn = get_db()
     if request.method == "POST":
+        try:
+            comissao_pct = float(request.form.get("comissao_percentual", "15").replace(",", "."))
+        except ValueError:
+            comissao_pct = 15.0
+        comissao_pct = max(0.0, min(comissao_pct, 100.0))  # nunca deixa negativo ou acima de 100%
         set_configs(conn, {
             "vendedor_nome": request.form.get("vendedor_nome", "").strip() or "Voxxel",
             "pix_chave": request.form.get("pix_chave", "").strip(),
@@ -829,6 +933,7 @@ def admin_configuracoes():
             "pix_cidade": request.form.get("pix_cidade", "").strip() or "Sao Jose dos Pinhais",
             "whatsapp": request.form.get("whatsapp", "").strip(),
             "mp_access_token": request.form.get("mp_access_token", "").strip(),
+            "comissao_percentual": str(comissao_pct),
         })
         flash("Configurações salvas.")
         conn.close()
@@ -1020,7 +1125,24 @@ def admin_produto_excluir(produto_id):
 def admin_pedidos():
     status_filtro = request.args.get("status", "todos")
     conn = get_db()
+
+    # Avança a fila de despacho antes de montar a listagem: expira ofertas
+    # vencidas dos pedidos "buscando", e dá uma segunda chance aos que
+    # ficaram "sem impressora" (pode ter aparecido alguém disponível
+    # desde a última tentativa). Sem worker em segundo plano, é a própria
+    # visita a essa tela que "puxa" o avanço da fila.
+    em_busca = conn.execute(
+        "SELECT id FROM pedidos WHERE distribuicao_status = 'buscando'"
+    ).fetchall()
+    for row in em_busca:
+        distribuicao.avancar_distribuicao(conn, row["id"])
+    distribuicao.reconsiderar_pedidos_sem_impressora(conn)
+
     todos = conn.execute("SELECT * FROM pedidos ORDER BY id DESC").fetchall()
+    impressoras_disponiveis = conn.execute(
+        "SELECT id, nome FROM impressoras WHERE ativo = 1 ORDER BY nome"
+    ).fetchall()
+    impressoras_por_id = {imp["id"]: imp["nome"] for imp in conn.execute("SELECT id, nome FROM impressoras").fetchall()}
     conn.close()
 
     contagens = {"todos": len(todos), "novo": 0, "andamento": 0, "concluido": 0}
@@ -1034,8 +1156,59 @@ def admin_pedidos():
         pedidos = todos
 
     return render_template(
-        "admin_pedidos.html", pedidos=pedidos, status_filtro=status_filtro, contagens=contagens
+        "admin_pedidos.html", pedidos=pedidos, status_filtro=status_filtro, contagens=contagens,
+        impressoras_disponiveis=impressoras_disponiveis, impressoras_por_id=impressoras_por_id,
     )
+
+
+@app.route("/admin/pedidos/<int:pedido_id>/atribuir-impressora", methods=["POST"])
+@login_obrigatorio
+def admin_pedido_atribuir_impressora(pedido_id):
+    """Válvula de escape manual: usada quando ninguém aceitou
+    automaticamente (ou pra forçar uma impressora específica), sem
+    depender da fila de ofertas."""
+    try:
+        impressora_id = int(request.form.get("impressora_id", ""))
+    except (TypeError, ValueError):
+        flash("Selecione uma impressora válida.")
+        return redirect(url_for("admin_pedidos"))
+
+    conn = get_db()
+    pedido = conn.execute("SELECT id FROM pedidos WHERE id = ?", (pedido_id,)).fetchone()
+    impressora = buscar_impressora_por_id(conn, impressora_id)
+    if not pedido:
+        conn.close()
+        flash("Pedido não encontrado.")
+        return redirect(url_for("admin_pedidos"))
+    if not impressora or not impressora["ativo"]:
+        conn.close()
+        flash("Essa impressora não está disponível pra receber pedidos.")
+        return redirect(url_for("admin_pedidos"))
+
+    distribuicao.atribuir_manualmente(conn, pedido_id, impressora_id)
+    conn.close()
+    flash(f"Pedido atribuído manualmente a {impressora['nome']}.")
+    return redirect(url_for("admin_pedidos"))
+
+
+@app.route("/admin/impressoras")
+@login_obrigatorio
+def admin_impressoras():
+    conn = get_db()
+    impressoras = listar_impressoras(conn)
+    conn.close()
+    return render_template("admin_impressoras.html", impressoras=impressoras)
+
+
+@app.route("/admin/impressoras/<int:impressora_id>/toggle", methods=["POST"])
+@login_obrigatorio
+def admin_impressora_toggle(impressora_id):
+    conn = get_db()
+    impressora = buscar_impressora_por_id(conn, impressora_id)
+    if impressora:
+        definir_impressora_ativa(conn, impressora_id, not impressora["ativo"])
+    conn.close()
+    return redirect(url_for("admin_impressoras"))
 
 
 @app.route("/admin/pedidos/<int:pedido_id>/status", methods=["POST"])
@@ -1050,6 +1223,199 @@ def admin_pedido_status(pedido_id):
     conn.commit()
     conn.close()
     return redirect(url_for("admin_pedidos"))
+
+
+# ---------- painel da impressora parceira (marketplace) ----------
+
+TELEFONE_MIN_DIGITOS_IMPRESSORA = 10
+
+
+@app.route("/impressora/cadastro", methods=["GET", "POST"])
+def impressora_cadastro():
+    if session.get("impressora_id"):
+        return redirect(url_for("impressora_painel"))
+
+    if request.method == "POST":
+        nome = texto_seguro(request.form.get("nome"), 120)
+        telefone = normalizar_telefone(request.form.get("telefone"))
+        senha = request.form.get("senha", "")
+        confirmar_senha = request.form.get("confirmar_senha", "")
+
+        erro = None
+        if not nome:
+            erro = "Preencha seu nome (ou o nome da sua impressora/oficina)."
+        elif len(telefone) < TELEFONE_MIN_DIGITOS_IMPRESSORA:
+            erro = "Informe um telefone válido, com DDD."
+        elif len(senha) < 6:
+            erro = "A senha precisa ter pelo menos 6 caracteres."
+        elif senha != confirmar_senha:
+            erro = "As senhas não coincidem."
+
+        conn = get_db()
+        if not erro and buscar_impressora_por_telefone(conn, telefone):
+            erro = "Já existe uma impressora cadastrada com esse telefone. Faça login."
+
+        if erro:
+            conn.close()
+            flash(erro)
+            return render_template("impressora_cadastro.html")
+
+        impressora_id = criar_impressora(conn, nome, telefone, generate_password_hash(senha))
+        conn.close()
+
+        session.clear()
+        session["impressora_id"] = impressora_id
+        session["impressora_nome"] = nome
+        session.permanent = True
+        flash("Cadastro feito! Agora é só ficar online no painel pra começar a receber pedidos.")
+        return redirect(url_for("impressora_painel"))
+
+    return render_template("impressora_cadastro.html")
+
+
+@app.route("/impressora/entrar", methods=["GET", "POST"])
+def impressora_entrar():
+    if session.get("impressora_id"):
+        return redirect(url_for("impressora_painel"))
+
+    erro = None
+    ip = request.remote_addr or "desconhecido"
+    chave_rate_limit = f"impressora:{ip}"
+
+    if request.method == "POST":
+        if login_bloqueado(chave_rate_limit):
+            erro = "Muitas tentativas de login. Aguarde alguns minutos e tente novamente."
+        else:
+            telefone = normalizar_telefone(request.form.get("telefone"))
+            senha = request.form.get("senha", "")
+            conn = get_db()
+            impressora = buscar_impressora_por_telefone(conn, telefone)
+            conn.close()
+            if impressora and check_password_hash(impressora["senha_hash"], senha):
+                session.clear()
+                session["impressora_id"] = impressora["id"]
+                session["impressora_nome"] = impressora["nome"]
+                session.permanent = True
+                return redirect(next_seguro(url_for("impressora_painel")))
+            registrar_falha_login(chave_rate_limit)
+            erro = "Telefone ou senha incorretos."
+
+    return render_template("impressora_entrar.html", erro=erro)
+
+
+@app.route("/impressora/sair")
+def impressora_sair():
+    session.pop("impressora_id", None)
+    session.pop("impressora_nome", None)
+    return redirect(url_for("home"))
+
+
+@app.route("/impressora/painel")
+@login_impressora_obrigatorio
+def impressora_painel():
+    conn = get_db()
+    impressora = buscar_impressora_por_id(conn, session["impressora_id"])
+    if not impressora:
+        conn.close()
+        session.clear()
+        return redirect(url_for("impressora_entrar"))
+
+    oferta = distribuicao.oferta_pendente_da_impressora(conn, impressora["id"])
+    oferta_pedido = None
+    oferta_distancia_km = None
+    oferta_segundos_restantes = None
+    oferta_ganho_estimado = None
+    pct_comissao = percentual_comissao(conn)
+    if oferta:
+        oferta_pedido = conn.execute("SELECT * FROM pedidos WHERE id = ?", (oferta["pedido_id"],)).fetchone()
+        oferta_segundos_restantes = distribuicao.segundos_restantes_oferta(oferta)
+        if oferta_pedido and impressora["latitude"] is not None:
+            oferta_distancia_km = round(
+                distribuicao.haversine_km(
+                    impressora["latitude"], impressora["longitude"],
+                    oferta_pedido["cliente_lat"], oferta_pedido["cliente_lng"],
+                ),
+                1,
+            )
+        if oferta_pedido:
+            # Quanto a impressora efetivamente embolsa se aceitar -- valor
+            # do pedido já descontada a comissão da Voxxel, pra ela decidir
+            # com o número certo na mão, não o valor bruto do pedido.
+            oferta_ganho_estimado = round(oferta_pedido["valor_estimado"] * (1 - pct_comissao / 100), 2)
+
+    pedidos_atribuidos = listar_pedidos_da_impressora(conn, impressora["id"])
+    ganho_acumulado = sum(
+        (p["valor_estimado"] - (p["comissao_voxxel"] or 0)) for p in pedidos_atribuidos
+    )
+    conn.close()
+
+    return render_template(
+        "impressora_painel.html", impressora=impressora, oferta=oferta, oferta_pedido=oferta_pedido,
+        oferta_distancia_km=oferta_distancia_km, oferta_segundos_restantes=oferta_segundos_restantes,
+        oferta_ganho_estimado=oferta_ganho_estimado, pedidos=pedidos_atribuidos,
+        ganho_acumulado=round(ganho_acumulado, 2), pct_comissao=pct_comissao,
+    )
+
+
+@app.route("/impressora/status", methods=["POST"])
+@login_impressora_obrigatorio
+def impressora_status():
+    conn = get_db()
+    impressora = buscar_impressora_por_id(conn, session["impressora_id"])
+    if not impressora or not impressora["ativo"]:
+        conn.close()
+        flash("Sua conta de impressora parceira está bloqueada. Fale com a Voxxel.")
+        return redirect(url_for("impressora_painel"))
+
+    online = request.form.get("online") == "1"
+    latitude = ler_coordenada_formulario(request.form.get("latitude"))
+    longitude = ler_coordenada_formulario(request.form.get("longitude"))
+    if online and (latitude is None or longitude is None):
+        conn.close()
+        flash("Precisamos da sua localização pra te colocar online -- permita o acesso à localização no navegador.")
+        return redirect(url_for("impressora_painel"))
+
+    definir_status_impressora(conn, session["impressora_id"], online, latitude, longitude)
+    if online:
+        # Impressora acabou de ficar disponível: vale a pena reconsiderar
+        # pedidos que tinham ficado "sem impressora" -- talvez ela seja a
+        # primeira opção disponível pra algum deles agora.
+        distribuicao.reconsiderar_pedidos_sem_impressora(conn)
+    conn.close()
+    return redirect(url_for("impressora_painel"))
+
+
+@app.route("/impressora/localizacao", methods=["POST"])
+@login_impressora_obrigatorio
+def impressora_localizacao():
+    """Ping em segundo plano (AJAX) enviado pelo painel enquanto a
+    impressora está online, pra manter a posição sempre atualizada."""
+    latitude = ler_coordenada_formulario(request.form.get("latitude"))
+    longitude = ler_coordenada_formulario(request.form.get("longitude"))
+    if latitude is None or longitude is None:
+        return {"ok": False}, 400
+    conn = get_db()
+    atualizar_localizacao_impressora(conn, session["impressora_id"], latitude, longitude)
+    conn.close()
+    return {"ok": True}
+
+
+@app.route("/impressora/oferta/<int:oferta_id>/responder", methods=["POST"])
+@login_impressora_obrigatorio
+def impressora_oferta_responder(oferta_id):
+    acao = request.form.get("acao")
+    if acao not in ("aceitar", "recusar"):
+        abort(400)
+    conn = get_db()
+    aplicado = distribuicao.responder_oferta(conn, oferta_id, session["impressora_id"], acao == "aceitar")
+    conn.close()
+    if not aplicado:
+        flash("Essa oferta não está mais disponível (talvez já tenha expirado).")
+    elif acao == "aceitar":
+        flash("Pedido aceito! Já apareceu na sua lista de impressões.")
+    else:
+        flash("Oferta recusada. Ela foi repassada pra próxima impressora mais próxima.")
+    return redirect(url_for("impressora_painel"))
 
 
 if __name__ == "__main__":
