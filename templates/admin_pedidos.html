@@ -1,0 +1,88 @@
+{% extends "admin_base.html" %}
+{% block title %}Pedidos — Painel Voxxel{% endblock %}
+{% block eyebrow %}Vendas{% endblock %}
+{% block page_title %}Pedidos{% endblock %}
+
+{% block admin_content %}
+<div class="admin-filter-chips" style="margin-bottom:24px;">
+  <a class="chip {{ 'active' if status_filtro == 'todos' }}" href="{{ url_for('admin_pedidos') }}">
+    Todos <span class="chip-count">{{ contagens.todos }}</span>
+  </a>
+  <a class="chip {{ 'active' if status_filtro == 'novo' }}" href="{{ url_for('admin_pedidos', status='novo') }}">
+    Novo <span class="chip-count">{{ contagens.novo }}</span>
+  </a>
+  <a class="chip {{ 'active' if status_filtro == 'andamento' }}" href="{{ url_for('admin_pedidos', status='andamento') }}">
+    Em andamento <span class="chip-count">{{ contagens.andamento }}</span>
+  </a>
+  <a class="chip {{ 'active' if status_filtro == 'concluido' }}" href="{{ url_for('admin_pedidos', status='concluido') }}">
+    Concluído <span class="chip-count">{{ contagens.concluido }}</span>
+  </a>
+</div>
+
+{% if pedidos %}
+<div class="order-list">
+  {% for p in pedidos %}
+  <div class="order-card">
+    <div class="order-card-main">
+      <div class="order-card-id">Pedido #{{ p['id'] }} · {{ p['criado_em'] }}</div>
+      <div class="order-card-tipo">{{ 'Loja' if p['tipo'] == 'loja' else 'Orçamento' }}</div>
+      {% if p['cliente_nome'] or p['cliente_telefone'] %}
+      <div class="order-card-cliente">
+        {{ p['cliente_nome'] or 'Cliente sem nome' }}
+        {% if p['cliente_telefone'] %}
+        · <a href="https://wa.me/55{{ p['cliente_telefone']|replace('(','')|replace(')','')|replace('-','')|replace(' ','') }}" target="_blank" rel="noopener">{{ p['cliente_telefone'] }}</a>
+        {% endif %}
+      </div>
+      {% endif %}
+      <div class="order-card-detalhes">{{ p['detalhes'] }}</div>
+      {% if p['impressora_id'] or p['distribuicao_status'] in ('buscando', 'sem_impressora') %}
+      <div class="order-card-impressora">
+        {% if p['impressora_id'] %}
+          🖨️ Impressora: <strong>{{ impressoras_por_id.get(p['impressora_id'], 'desconhecida') }}</strong>
+        {% elif p['distribuicao_status'] == 'buscando' %}
+          🖨️ Procurando impressora parceira...
+        {% elif p['distribuicao_status'] == 'sem_impressora' %}
+          🖨️ <span style="color:var(--err);">Sem impressora disponível</span>
+          {% if impressoras_disponiveis %}
+          <form method="post" action="{{ url_for('admin_pedido_atribuir_impressora', pedido_id=p['id']) }}" style="display:inline-flex; gap:6px; margin-left:8px;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <select name="impressora_id" style="font-size:.78rem;">
+              {% for imp in impressoras_disponiveis %}
+              <option value="{{ imp['id'] }}">{{ imp['nome'] }}</option>
+              {% endfor %}
+            </select>
+            <button type="submit" class="btn-ghost" style="padding:4px 10px; font-size:.75rem;">Atribuir</button>
+          </form>
+          {% endif %}
+        {% endif %}
+      </div>
+      {% endif %}
+    </div>
+    <div class="order-card-side">
+      <div class="order-card-valor">R$ {{ "%.2f"|format(p['valor_estimado'])|replace('.', ',') }}</div>
+      <div class="order-card-pag">
+        <span class="badge {{ 'badge-concluido' if p['status_pagamento'] == 'informado' else 'badge-novo' }}">
+          {{ 'Pago (informado)' if p['status_pagamento'] == 'informado' else 'Aguardando pagamento' }}
+        </span>
+        <span class="pag-metodo">
+          {% if p['forma_pagamento'] == 'pix' %}Pix
+          {% elif p['forma_pagamento'] == 'cartao' %}Cartão
+          {% else %}Combinado{% endif %}
+        </span>
+      </div>
+      <form method="post" action="{{ url_for('admin_pedido_status', pedido_id=p['id']) }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <select name="status" onchange="this.form.submit()" class="badge badge-{{ p['status'] }}">
+          <option value="novo" {{ 'selected' if p['status']=='novo' }}>Novo</option>
+          <option value="andamento" {{ 'selected' if p['status']=='andamento' }}>Em andamento</option>
+          <option value="concluido" {{ 'selected' if p['status']=='concluido' }}>Concluído</option>
+        </select>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">Nenhum pedido{{ ' com esse status' if status_filtro != 'todos' else '' }} registrado ainda.</div>
+{% endif %}
+{% endblock %}

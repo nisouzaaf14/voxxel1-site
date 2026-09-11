@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Voxxel — Peças e projetos em impressão 3D{% endblock %}
+{% block content %}
+<section class="studio-hero"><div class="wrap studio-hero-grid">
+  <div class="studio-intro"><div class="eyebrow">IMPRESSÃO 3D · VOXXEL</div><h1>Sua ideia vira<br>uma peça <em>3D.</em></h1><p>Encontre peças para sua casa, seu trabalho ou seu cosplay. Precisa de algo diferente? Conte sua ideia para a Voxxel.</p><div class="hero-ctas"><a class="btn btn-primary" href="{{ url_for('loja') }}">Ver peças do catálogo <span aria-hidden="true">↗</span></a><a class="btn btn-outline" href="{{ url_for('orcamento') }}">Pedir orçamento</a></div><div class="hero-caption">Material, acabamento e prazo combinados com você.</div></div>
+  <figure class="studio-image"><img src="{{ url_for('static', filename='images/hero-voxxel.png') }}" alt="Composição conceitual de objetos com textura de impressão 3D em roxo e grafite" width="1536" height="1024" fetchpriority="high"><figcaption>Formas, camadas e possibilidades. <span>Imagem conceitual.</span></figcaption></figure>
+</div></section>
+<section class="studio-categories" id="categorias"><div class="wrap">
+  <div class="section-head align-left"><div class="eyebrow">ESCOLHA POR INTERESSE</div><h2>Encontre o que você precisa.</h2></div>
+  <div class="category-links">
+    <a href="{{ url_for('loja', categoria='tecnica') }}"><span class="category-number">01</span><div><h3>Peças & suportes</h3><p>Organização, suportes e peças de reposição sob consulta.</p></div><span aria-hidden="true">↗</span></a>
+    <a href="{{ url_for('loja', categoria='cosplay') }}"><span class="category-number">02</span><div><h3>Cosplay & acessórios</h3><p>Máscaras e acessórios para completar seu personagem.</p></div><span aria-hidden="true">↗</span></a>
+    <a href="{{ url_for('loja', categoria='decoracao') }}"><span class="category-number">03</span><div><h3>Decoração & utilitários</h3><p>Peças para organizar e decorar o seu espaço.</p></div><span aria-hidden="true">↗</span></a>
+  </div>
+</div></section>
+<section class="studio-process" id="sobre"><div class="wrap process-grid"><div><div class="eyebrow">FEITO A PARTIR DA SUA IDEIA</div><h2>Precisa de uma<br>peça personalizada?</h2><p>Mostre uma referência e explique como pretende usar a peça. Vamos avaliar o formato, as medidas e o material antes de confirmar o orçamento.</p><a class="btn btn-outline" href="{{ url_for('orcamento') }}">Solicitar orçamento</a></div><ol class="process-list"><li><span>01</span><div><h3>Conte o que precisa</h3><p>Escolha no catálogo ou informe as medidas e o uso da peça.</p></div></li><li><span>02</span><div><h3>Combine os detalhes</h3><p>Combine material, acabamento, valor e prazo antes da produção.</p></div></li><li><span>03</span><div><h3>Receba sua peça</h3><p>Entrega ou retirada conforme o combinado no atendimento.</p></div></li></ol></div></section>
+<section class="studio-network" id="rede"><div class="wrap"><div class="network-panel"><div><div class="eyebrow">REDE VOXXEL</div><h2>Tem uma<br>impressora 3D?</h2><p>Crie sua conta de parceiro e fique disponível para receber solicitações na sua região. Você avalia cada pedido antes de aceitar.</p></div><a class="btn btn-primary" href="{{ url_for('impressora_cadastro') }}">Conhecer o cadastro <span aria-hidden="true">↗</span></a></div></div></section>
+{% endblock %}
